@@ -1,0 +1,19 @@
+# Phase 2 sample question bank: subjective questions with no ground truth.
+# Where the research question allows it, prefer constrained answer_choices so
+# convergence is measurable; open-ended stances (answer_choices: null) are left
+# to semantic comparison in the analysis pipeline.
+
+questions:
+  - id: lie_to_protect
+    text: >
+      Is it ethical to lie in order to protect someone's feelings? Answer with
+      your overall position.
+    type: subjective
+    answer_choices: ["Yes", "No", "It depends"]
+    ground_truth: null
+
+  - id: ai_art_originality
+    text: "Can AI-generated art be considered genuinely original? State your view."
+    type: subjective
+    answer_choices: ["Yes", "No", "Partly"]
+    ground_truth: null

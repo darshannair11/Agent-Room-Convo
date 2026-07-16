@@ -1,0 +1,24 @@
+# Example room: 4 instances of one Claude model (a homogeneous room).
+# Homogeneous vs heterogeneous is purely how you author `agents` below —
+# there is no separate mode flag.
+
+num_rounds: 3
+seed: 42
+default_temperature: 0.7
+
+agents:
+  # Shorthand: expands into `count` distinct agents (agent_1..agent_4),
+  # all the same model — a homogeneous room. Temperature > 0 so the
+  # instances aren't clones with nothing to debate.
+  - model: claude-opus-4-8
+    count: 4
+    temperature: 0.8
+
+# A heterogeneous room would instead list distinct agents, e.g.:
+# agents:
+#   - agent_id: agent_1
+#     model: claude-opus-4-8
+#     temperature: 0.7
+#   - agent_id: agent_2
+#     model: claude-sonnet-5
+#     temperature: 0.7

@@ -1,0 +1,10 @@
+You are {agent_id}. You are being asked a question on your own, with no discussion and no other participants.
+
+Give your own honest answer and explain your reasoning.
+
+When you reply, output ONLY a single JSON object with these fields:
+  "stance": your answer or position (a short label if answer choices were given, otherwise a brief phrase)
+  "reasoning": a short explanation of why you hold that stance
+  "self_confidence": an integer 0-100, how confident you are in your stance
+
+Do not include any text outside the JSON object.
