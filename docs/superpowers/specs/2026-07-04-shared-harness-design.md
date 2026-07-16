@@ -21,6 +21,7 @@ A Python harness that runs a multi-agent "chat room": several LLM agents discuss
 | Stopping condition | Fixed number of rounds — no convergence early-stop | Convergence stop would bias the phenomenon under study; better to observe full opinion trajectory |
 | Rooms/rounds/agents | Configurable (`num_rounds`, `num_agents`) | No hard default baked in |
 | Solo elicitation | Baked into harness core (pre + post discussion) | Cheap now; keeps one consistent transcript schema across phases (Phase 2 needs it) |
+| Sampling temperature | Per-agent config knob; homogeneous rooms require > 0 | At temperature 0, same-model instances are clones with no diversity to debate |
 | Storage | JSON files, one per run | Human-readable, zero setup, easy for pandas-based analysis |
 | Invocation | Both CLI and library API | Scriptable experiment runs + importable from notebooks/scripts |
 | Config format | YAML/JSON config files | Reusable room configs + separate question-bank files, hand-authorable |
@@ -56,6 +57,40 @@ tests/
 ```
 
 Each module has one job. `scheduler.py` orders agents fairly; `models/` calls an LLM and returns a structured response; `graph.py` wires those into the round loop; `storage.py` reads/writes transcript JSON. Downstream phases consume `transcript.py`'s format and `models/base.py`'s interface without touching graph internals.
+
+## Config & question schemas
+
+`Question` and `RoomConfig` are the two hand-authored inputs. Both are loaded from YAML/JSON and validated at startup.
+
+```python
+@dataclass
+class Question:
+    id: str
+    text: str
+    type: str                      # "objective" | "subjective"
+    answer_choices: list[str] | None  # constrained stance labels, e.g. ["A","B","C","D"]
+    ground_truth: str | None       # required for objective, None for subjective
+
+@dataclass
+class AgentSpec:
+    agent_id: str                  # neutral id, e.g. "agent_1"
+    model: str                     # e.g. "claude-opus-4-8"
+    temperature: float             # per-agent sampling temperature
+    tool_access: bool              # web/search flag — parsed now, unused until Phase 3
+
+@dataclass
+class RoomConfig:
+    num_rounds: int
+    seed: int
+    agents: list[AgentSpec]        # explicit list — length is the agent count
+    default_temperature: float     # applied when an AgentSpec omits temperature
+```
+
+**Homogeneous vs heterogeneous is expressed by how `agents` is authored**, not a separate mode flag. The config loader supports a shorthand that expands `{model: X, count: N}` into N `AgentSpec`s with distinct ids (homogeneous); an explicit list of differing `AgentSpec`s is heterogeneous. `num_agents` is therefore always derived from `len(agents)`, never a separate knob.
+
+**Sampling temperature is first-class and matters for the homogeneous condition.** N instances of the same model at temperature 0 produce near-identical outputs — there is no genuine diversity to debate and the homogeneous baseline collapses. Homogeneous configs must set temperature > 0; the loader warns if a multi-instance same-model room is configured at temperature 0.
+
+**Stance labels and metrics.** When `answer_choices` is set (objective, and recommended for constrained subjective questions), the agent is instructed to emit its stance as one of those labels, and the adapter normalizes the parsed stance (trim + match against choices) so agreement-rate and flip-rate are exact string comparisons. For open-ended subjective questions with `answer_choices: null`, `stance` is a free-form short label — string-equality agreement is unreliable there, and semantic comparison is left to the analysis pipeline (Mehal). Phase 2 question design should prefer constrained `answer_choices` wherever the research question allows it.
 
 ## Room state graph (LangGraph)
 
@@ -105,6 +140,8 @@ Generates a speaking order per round with two constraints:
 
 A `seed` makes ordering reproducible and is stored in the transcript. This is the most logic-heavy unit and is unit-tested hardest.
 
+**First-mover edge case:** the very first speaker of round 0 has an empty transcript and no peers to assess, so `perceived_peer_confidence` is meaningless. That field is nullable and recorded as `None` for any turn taken before the agent has seen at least one peer turn, rather than forcing a blind guess into the confidence-gap data.
+
 ## Data model & transcript JSON
 
 Every model response is structured, not free text. Each group turn asks for stance, reasoning, and two confidence numbers (own + perceived peer, feeding the confidence-gap metric).
@@ -118,8 +155,9 @@ class Turn:
     stance: str                    # short answer/position label (e.g. "A", "yes")
     reasoning: str                 # free-text justification
     self_confidence: int           # 0-100
-    perceived_peer_confidence: int # 0-100
+    perceived_peer_confidence: int | None  # 0-100; None if no peer turn seen yet
     raw_response: str              # full model output, for audit
+    malformed: bool                # True if structured parse failed after retry
     timestamp: str
 
 @dataclass
@@ -175,15 +213,16 @@ class ModelResponse:
 - `room_system_prompt.txt` — frames the agent as a group-discussion participant working toward a good answer; specifies the required JSON output shape.
 - `solo_system_prompt.txt` — same contract minus `perceived_peer_confidence`.
 
-**Transcript context:** before each turn, the graph serializes the discussion so far as readable text (`Agent {id} (round N): {stance} — {reasoning}`). Every agent sees the same shared transcript — real multi-turn interaction, not a canned peer-summary (the other PIMMUR guardrail). Neutral agent ids avoid name/positional prestige.
+**Transcript context:** before each turn, the graph serializes the discussion so far as readable text (`Agent {id} (round N): {stance} — {reasoning}`). Every agent sees the same shared transcript — real multi-turn interaction, not a canned peer-summary (the other PIMMUR guardrail). Neutral agent ids avoid name/positional prestige. The acting agent is told which id is itself ("You are Agent X") so it can recognize and reason about revising its own prior positions — self-identification is required for flip-tracking and does not reintroduce prestige, since all ids remain neutral.
 
 ## Error handling & operational concerns
 
 - **Malformed structured output** — parse JSON; on failure, one retry with an explicit "return only valid JSON in this shape" nudge; on second failure, record the turn with `malformed: true` and preserved `raw_response`, then continue. One bad turn never kills an expensive run.
 - **API failures (rate limit / timeout / 5xx)** — retry with exponential backoff; if still failing, abort the run but write a partial transcript with an `error` field in metadata.
 - **Determinism** — `seed` controls scheduler shuffling and is stored. LLM calls aren't deterministic even at temperature 0, but ordering and config are fully reproducible — what matters for fair condition comparison.
-- **Cost visibility** — token usage per call captured per turn and totaled in `metadata`.
+- **Cost visibility** — token usage per call captured per turn and totaled in `metadata`. Note the full accumulated transcript is re-sent on every turn, so per-room cost scales roughly with agents × rounds² — cheap for small rooms, but the reason `num_rounds`/agent count are configurable rather than large by default. Prompt caching is the future lever if rooms get long; out of scope for now.
 - **Secrets** — `ANTHROPIC_API_KEY` from environment (`.env` via python-dotenv), never in config. `.env` and `data/runs/` gitignored.
+- **Sequential within a room, by design** — agents must see prior turns, so turns cannot be parallelized inside a room. Parallelism, if needed, is across independent room runs (deferred; not required for the first pass).
 
 ## Testing strategy
 
